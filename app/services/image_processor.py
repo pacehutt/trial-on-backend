@@ -1,57 +1,38 @@
-import numpy as np
 import cv2
+import numpy as np
+from .segmentation import segment_person
 
-color_ranges = {
-    "red": [(np.array([0, 120, 70]), np.array([10, 255, 255])),
-            (np.array([170, 120, 70]), np.array([180, 255, 255]))],
-    "green": [(np.array([25, 52, 72]), np.array([102, 255, 255]))],
-    "blue": [(np.array([100, 150, 50]), np.array([140, 255, 255]))],
-    "yellow": [(np.array([20, 100, 100]), np.array([30, 255, 255]))],
-    "black": [(np.array([0, 0, 0]), np.array([180, 255, 50]))],
-    "white": [(np.array([0, 0, 200]), np.array([180, 55, 255]))]
-}
+# (keep your existing color_ranges here…)
 
-def apply_design_to_clothing(frame, design):
+def apply_design_to_clothing(frame: np.ndarray, design: np.ndarray) -> np.ndarray:
+    # 1) Get a person mask
+    person_mask = segment_person(frame)
+
+    # 2) (Optional) intersect with a color range if you still need color filtering
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    # e.g. green shirt only
+    lower, upper = np.array([25,52,72]), np.array([102,255,255])
+    color_mask = cv2.inRange(hsv, lower, upper)
 
-    detected_color = None
-    mask_white = None
+    # Combine masks: you could OR all colors, but AND with the person region
+    clothing_mask = cv2.bitwise_and(person_mask, color_mask)
 
-    for color, ranges in color_ranges.items():
-        mask = None
-        for lower, upper in ranges:
-            if mask is None:
-                mask = cv2.inRange(hsv, lower, upper)
-            else:
-                mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lower, upper))
+    # 3) Clean up mask
+    kernel = np.ones((5,5), np.uint8)
+    clothing_mask = cv2.morphologyEx(clothing_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    clothing_mask = cv2.morphologyEx(clothing_mask, cv2.MORPH_OPEN,  kernel, iterations=2)
 
-        kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+    # 4) Create 3‑channel mask
+    mask_3ch = cv2.merge([clothing_mask]*3)
+    inv_mask = cv2.bitwise_not(clothing_mask)
+    inv_3ch  = cv2.merge([inv_mask]*3)
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if contours:
-            largest_contour = max(contours, key=cv2.contourArea)
-            mask = np.zeros_like(mask)
-            cv2.drawContours(mask, [largest_contour], -1, (255), thickness=cv2.FILLED)
+    # 5) Carve out original shirt region
+    bg = cv2.bitwise_and(frame, inv_3ch)
 
-        if np.sum(mask) > 500000:
-            detected_color = color
-            mask_white = mask
-            break
+    # 6) Resize design to full image, then carve it to clothing region
+    design_resized = cv2.resize(design, (frame.shape[1], frame.shape[0]))
+    fg = cv2.bitwise_and(design_resized, mask_3ch)
 
-    if detected_color is None or mask_white is None:
-        return None
-
-    mask_black = cv2.bitwise_not(mask_white)
-
-    mask_black_3CH = cv2.merge([mask_black]*3)
-    mask_white_3CH = cv2.merge([mask_white]*3)
-
-    tshirt_area = cv2.bitwise_and(frame, mask_black_3CH)
-
-    design = cv2.resize(design, (frame.shape[1], frame.shape[0]))
-    design_masked = cv2.bitwise_and(design, mask_white_3CH)
-
-    final_output = cv2.addWeighted(tshirt_area, 1, design_masked, 1, 0)
-    return final_output
+    # 7) Blend
+    return cv2.addWeighted(bg, 1.0, fg, 1.0, 0)
